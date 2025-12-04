@@ -36,16 +36,19 @@ impl BackendClient {
         let request_headers = request_builder.headers_mut().unwrap();
         request_headers.insert("content-type", "application/json".parse().unwrap());
 
-        let backend_request = request_builder.body(Full::new(body))?;
+        // Normalize empty request body to "{}"
+        let request_body = if body.is_empty() {
+            Bytes::from("{}")
+        } else {
+            body
+        };
+
+        let backend_request = request_builder.body(Full::new(request_body))?;
         let response = self.client.request(backend_request).await?;
 
         // Convert response body from Incoming to Full<Bytes>
         let (parts, body) = response.into_parts();
-        let mut body_bytes = body.collect().await?.to_bytes();
-        // Ensure body is at least "{}" if empty
-        if body_bytes.is_empty() {
-            body_bytes = Bytes::from("{}");
-        }
+        let body_bytes = body.collect().await?.to_bytes();
         Ok(Response::from_parts(parts, Full::new(body_bytes)))
     }
 }
