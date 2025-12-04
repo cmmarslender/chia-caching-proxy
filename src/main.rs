@@ -1,13 +1,14 @@
+mod client;
 mod tls;
 
+use crate::client::BackendClient;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper::{Method, Request, Response, Uri};
-use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
+use hyper::{Request, Response};
+use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
-use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioIo;
 use rocksdb::{DB, Options};
 use std::convert::Infallible;
@@ -33,11 +34,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .https_or_http()
         .enable_http1()
         .build();
-    let client =
+    let hyper_client =
         Client::builder(hyper_util::rt::TokioExecutor::new()).build::<_, Full<Bytes>>(https);
+    let backend_client = Arc::new(BackendClient::new(hyper_client));
 
-    // We create a TcpListener and bind it to 127.0.0.1:3000
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    // We create a TcpListener and bind it to 0.0.0.0:3000
+    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
     let listener = TcpListener::bind(addr).await?;
 
     // Start a loop to continuously accept incoming connections
@@ -50,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
         // clone for each connection task
         let db = db.clone();
-        let client = client.clone();
+        let backend_client = backend_client.clone();
 
         // Spawn a tokio task to serve multiple connections concurrently
         tokio::task::spawn(async move {
@@ -60,8 +62,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     io,
                     service_fn(move |req| {
                         let db = db.clone();
-                        let client = client.clone();
-                        async move { proxy_service(req, db, client).await }
+                        let backend_client = backend_client.clone();
+                        async move { proxy_service(req, db, backend_client).await }
                     }),
                 )
                 .await
@@ -75,9 +77,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 async fn proxy_service(
     request: Request<hyper::body::Incoming>,
     db: SharedDB,
-    client: Client<HttpsConnector<HttpConnector>, Full<Bytes>>,
+    backend_client: Arc<BackendClient>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
-    Ok(proxy_handler(request, db, client)
+    Ok(proxy_handler(request, db, backend_client)
         .await
         .unwrap_or_else(|e| {
             eprintln!("Proxy Error: {e}");
@@ -91,16 +93,10 @@ async fn proxy_service(
 async fn proxy_handler(
     request: Request<hyper::body::Incoming>,
     db: SharedDB,
-    client: Client<HttpsConnector<HttpConnector>, Full<Bytes>>,
+    backend_client: Arc<BackendClient>,
 ) -> anyhow::Result<Response<Full<Bytes>>> {
     let request_path = request.uri().path().to_owned();
-    let request_headers = request.headers().clone();
-
-    let mut body_bytes = request.collect().await?.to_bytes();
-    // Ensure body is at least "{}" if empty
-    if body_bytes.is_empty() {
-        body_bytes = Bytes::from("{}");
-    }
+    let body_bytes = request.collect().await?.to_bytes();
 
     // Generate the cache key and check RocksDB
     let cache_key = build_key(&request_path, &body_bytes);
@@ -111,26 +107,8 @@ async fn proxy_handler(
         return Ok(response_builder.body(Full::new(Bytes::from(cached_value)))?);
     }
 
-    // Open TCP connection to the remote host
-    // @TODO make chia host and port configurable via env
-    let host = "127.0.0.1";
-    let port = "8555";
-    let uri = format!("https://{host}:{port}{request_path}").parse::<Uri>()?;
-    let mut request_builder = Request::builder().method(Method::POST).uri(uri);
-
-    // Copy headers from the original request
-    let headers = request_builder.headers_mut().unwrap();
-    for (key, value) in &request_headers {
-        headers.insert(key, value.clone());
-    }
-
-    // Ensure Content-Type is set to application/json
-    if !request_headers.contains_key("content-type") {
-        headers.insert("content-type", "application/json".parse().unwrap());
-    }
-
-    let backend_request = request_builder.body(Full::new(body_bytes))?;
-    let response = client.request(backend_request).await?;
+    // Make request to backend using the wrapper client
+    let response = backend_client.request(&request_path, body_bytes).await?;
 
     // Extract status and headers from the response
     let (parts, body) = response.into_parts();
