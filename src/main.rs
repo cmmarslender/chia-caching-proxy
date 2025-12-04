@@ -22,9 +22,10 @@ type SharedDB = Arc<DB>;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Open rocksdb
+    let db_path = std::env::var("ROCKSDB_PATH").unwrap_or_else(|_| "rocksdb".to_string());
     let mut opts = Options::default();
     opts.create_if_missing(true);
-    let db = Arc::new(DB::open(&opts, "rocksdb")?);
+    let db = Arc::new(DB::open(&opts, &db_path)?);
 
     // Create a shared hyper client
     let (cert, key) = tls::load_chia_certs()?;
