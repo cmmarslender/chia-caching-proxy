@@ -11,6 +11,7 @@ use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioIo;
 use rocksdb::{DB, Options};
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -18,6 +19,7 @@ use tokio::net::TcpListener;
 
 // Type alias for convenience
 type SharedDB = Arc<DB>;
+type CacheAllowlist = Arc<HashSet<String>>;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -26,6 +28,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut opts = Options::default();
     opts.create_if_missing(true);
     let db = Arc::new(DB::open(&opts, &db_path)?);
+
+    // Load cache allowlist from environment variable
+    let cache_allowlist = Arc::new(load_cache_allowlist());
 
     // Create a shared hyper client
     let (cert, key) = tls::load_chia_certs()?;
@@ -54,6 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // clone for each connection task
         let db = db.clone();
         let backend_client = backend_client.clone();
+        let cache_allowlist = cache_allowlist.clone();
 
         // Spawn a tokio task to serve multiple connections concurrently
         tokio::task::spawn(async move {
@@ -64,7 +70,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     service_fn(move |req| {
                         let db = db.clone();
                         let backend_client = backend_client.clone();
-                        async move { proxy_service(req, db, backend_client).await }
+                        let cache_allowlist = cache_allowlist.clone();
+                        async move { proxy_service(req, db, backend_client, cache_allowlist).await }
                     }),
                 )
                 .await
@@ -79,8 +86,9 @@ async fn proxy_service(
     request: Request<hyper::body::Incoming>,
     db: SharedDB,
     backend_client: Arc<BackendClient>,
+    cache_allowlist: CacheAllowlist,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
-    Ok(proxy_handler(request, db, backend_client)
+    Ok(proxy_handler(request, db, backend_client, cache_allowlist)
         .await
         .unwrap_or_else(|e| {
             eprintln!("Proxy Error: {e}");
@@ -95,17 +103,25 @@ async fn proxy_handler(
     request: Request<hyper::body::Incoming>,
     db: SharedDB,
     backend_client: Arc<BackendClient>,
+    cache_allowlist: CacheAllowlist,
 ) -> anyhow::Result<Response<Full<Bytes>>> {
     let request_path = request.uri().path().to_owned();
     let body_bytes = request.collect().await?.to_bytes();
 
-    // Generate the cache key and check RocksDB
+    // Check if this path is allowed to be cached
+    // Only cache if allowlist is not empty AND path is in the allowlist
+    let is_cacheable = !cache_allowlist.is_empty() && cache_allowlist.contains(&request_path);
     let cache_key = build_key(&request_path, &body_bytes);
-    if let Ok(Some(cached_value)) = db.get(cache_key) {
-        let mut response_builder = Response::builder();
-        response_builder = response_builder.header("Content-Type", "application/json");
-        response_builder = response_builder.header("X-Cache", "HIT");
-        return Ok(response_builder.body(Full::new(Bytes::from(cached_value)))?);
+
+    if is_cacheable {
+        // Generate the cache key and check RocksDB
+        let cache_key = build_key(&request_path, &body_bytes);
+        if let Ok(Some(cached_value)) = db.get(cache_key) {
+            let mut response_builder = Response::builder();
+            response_builder = response_builder.header("Content-Type", "application/json");
+            response_builder = response_builder.header("X-Cache", "HIT");
+            return Ok(response_builder.body(Full::new(Bytes::from(cached_value)))?);
+        }
     }
 
     // Make request to backend using the wrapper client
@@ -119,9 +135,14 @@ async fn proxy_handler(
 
     let mut response_builder = Response::builder().status(parts.status);
     response_builder = response_builder.header("Content-Type", "application/json");
-    response_builder = response_builder.header("X-Cache", "MISS");
 
-    let _ = db.put(cache_key, &response_body_bytes);
+    if is_cacheable {
+        // Cache the respons
+        let _ = db.put(cache_key, &response_body_bytes);
+        response_builder = response_builder.header("X-Cache", "MISS");
+    } else {
+        response_builder = response_builder.header("X-Cache", "SKIP");
+    }
 
     Ok(response_builder
         .body(Full::new(response_body_bytes))
@@ -133,6 +154,25 @@ fn blake3_128(input: &[u8]) -> [u8; 16] {
     let full = blake3::hash(input);
     let truncated = &full.as_bytes()[0..16];
     truncated.try_into().unwrap() // [u8; 16]
+}
+
+/// Load cache allowlist from environment variable.
+/// If `CACHE_ALLOWLIST` is set, it should be a comma-separated list of paths.
+/// If empty or not set, no paths are cacheable (empty allowlist = cache nothing).
+fn load_cache_allowlist() -> HashSet<String> {
+    match std::env::var("CACHE_ALLOWLIST") {
+        Ok(val) => {
+            if val.trim().is_empty() {
+                HashSet::new() // Empty allowlist = cache nothing
+            } else {
+                val.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            }
+        }
+        Err(_) => HashSet::new(), // Not set = cache nothing
+    }
 }
 
 /// Build a 32-byte composite key:
