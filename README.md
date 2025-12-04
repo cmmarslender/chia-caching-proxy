@@ -10,7 +10,8 @@ The proxy listens for incoming HTTP requests and:
 3. Checks RocksDB for a cached response
 4. Returns cached response if found (cache HIT)
 5. Forwards the request to the Chia full node if not cached (cache MISS) or not cacheable
-6. Stores the response in cache for future requests (only if cacheable)
+6. Returns the response to the client immediately (non-blocking)
+7. Asynchronously parses the response JSON and caches it only if it contains `"success": true`
 
 ## Configuration
 
@@ -55,7 +56,7 @@ Example:
 export CHIA_FULL_NODE_HOST=192.168.1.100
 export CHIA_FULL_NODE_PORT=8555
 export ROCKSDB_PATH=/var/cache/chia-proxy
-export CACHE_ALLOWLIST=/get_blockchain_state,/get_network_info
+export CACHE_ALLOWLIST=/get_coin_record_by_name,/get_network_info
 
 # Run the proxy
 cargo run
@@ -63,9 +64,16 @@ cargo run
 
 ### Cache Behavior
 
-The proxy uses an opt-in caching model:
+The proxy uses an opt-in caching model with success validation:
 - **If `CACHE_ALLOWLIST` is not set or empty**: No requests are cached. All requests are forwarded to the backend and return `X-Cache: SKIP`.
-- **If `CACHE_ALLOWLIST` is set**: Only requests to paths listed in the allowlist are cached. Cached requests return `X-Cache: HIT` or `X-Cache: MISS`, while non-cacheable requests return `X-Cache: SKIP`.
+- **If `CACHE_ALLOWLIST` is set**: Only requests to paths listed in the allowlist are eligible for caching. Cached requests return `X-Cache: HIT` or `X-Cache: MISS`, while non-cacheable requests return `X-Cache: SKIP`.
+
+**Success-based caching**: Even for cacheable paths, responses are only cached if:
+1. The response body is valid JSON
+2. The JSON contains a `"success"` field
+3. The `"success"` field has a value of `true`
+
+This means error responses (even with HTTP 200 status) are never cached. The response is returned to the client immediately, and JSON parsing and caching happen asynchronously in the background, ensuring minimal latency.
 
 All requests are still proxied to the backend regardless of cache configuration.
 

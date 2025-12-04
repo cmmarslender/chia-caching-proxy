@@ -11,6 +11,7 @@ use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioIo;
 use rocksdb::{DB, Options};
+use serde_json::Value;
 use std::collections::HashSet;
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -114,8 +115,7 @@ async fn proxy_handler(
     let cache_key = build_key(&request_path, &body_bytes);
 
     if is_cacheable {
-        // Generate the cache key and check RocksDB
-        let cache_key = build_key(&request_path, &body_bytes);
+        // Check RocksDB for cached response
         if let Ok(Some(cached_value)) = db.get(cache_key) {
             let mut response_builder = Response::builder();
             response_builder = response_builder.header("Content-Type", "application/json");
@@ -133,13 +133,30 @@ async fn proxy_handler(
     // Read the response body
     let response_body_bytes = body.collect().await?.to_bytes();
 
+    // Clone data needed for async caching task
+    let response_body_bytes_clone = response_body_bytes.clone();
+    let db_clone = db.clone();
+    let cache_key_clone = cache_key;
+
+    // Return response to client immediately
     let mut response_builder = Response::builder().status(parts.status);
     response_builder = response_builder.header("Content-Type", "application/json");
 
     if is_cacheable {
-        // Cache the respons
-        let _ = db.put(cache_key, &response_body_bytes);
         response_builder = response_builder.header("X-Cache", "MISS");
+
+        // Spawn background task to parse and cache if successful
+        tokio::task::spawn(async move {
+            if let Ok(json_value) = serde_json::from_slice::<Value>(&response_body_bytes_clone) {
+                // Check if response has "success" field set to true
+                if let Some(success) = json_value.get("success")
+                    && let Some(true) = success.as_bool()
+                {
+                    // Only cache successful responses
+                    let _ = db_clone.put(cache_key_clone, &response_body_bytes_clone);
+                }
+            }
+        });
     } else {
         response_builder = response_builder.header("X-Cache", "SKIP");
     }
