@@ -20,6 +20,7 @@ The proxy can be configured using the following environment variables:
 ### Backend Configuration
 - `CHIA_FULL_NODE_HOST` - Hostname or IP address of the Chia full node (default: `127.0.0.1`)
 - `CHIA_FULL_NODE_PORT` - Port of the Chia full node (default: `8555`)
+- `UPSTREAM_TIMEOUT_SECONDS` - Timeout in seconds for upstream requests (default: `30`)
 
 ### Certificate Configuration
 - `CHIA_CERT_PATH` - Path to the Chia full node certificate file (default: `~/.chia/config/ssl/full_node/private_full_node.crt`)
@@ -55,6 +56,7 @@ Example:
 # Set environment variables
 export CHIA_FULL_NODE_HOST=192.168.1.100
 export CHIA_FULL_NODE_PORT=8555
+export UPSTREAM_TIMEOUT_SECONDS=30
 export ROCKSDB_PATH=/var/cache/chia-proxy
 export CACHE_ALLOWLIST=/get_coin_record_by_name,/get_network_info
 

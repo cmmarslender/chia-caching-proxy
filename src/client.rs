@@ -4,6 +4,8 @@ use hyper::{Method, Request, Response, Uri};
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
+use std::time::Duration;
+use tokio::time;
 
 /// Wrapper around hyper client that handles backend host/port configuration
 #[derive(Clone)]
@@ -11,6 +13,7 @@ pub struct BackendClient {
     client: Client<HttpsConnector<HttpConnector>, Full<Bytes>>,
     host: String,
     port: u16,
+    timeout: Duration,
 }
 
 impl BackendClient {
@@ -21,7 +24,19 @@ impl BackendClient {
             .parse()
             .unwrap_or(8555);
 
-        Self { client, host, port }
+        // Load timeout from environment variable (default: 30 seconds)
+        let timeout_secs = std::env::var("UPSTREAM_TIMEOUT_SECONDS")
+            .unwrap_or_else(|_| "30".to_string())
+            .parse()
+            .unwrap_or(30);
+        let timeout = Duration::from_secs(timeout_secs);
+
+        Self {
+            client,
+            host,
+            port,
+            timeout,
+        }
     }
 
     pub(crate) async fn request(
@@ -44,7 +59,12 @@ impl BackendClient {
         };
 
         let backend_request = request_builder.body(Full::new(request_body))?;
-        let response = self.client.request(backend_request).await?;
+
+        // Apply timeout to the request
+        let response = time::timeout(self.timeout, self.client.request(backend_request))
+            .await
+            .map_err(|_| anyhow::anyhow!("Request to upstream timed out after {:?}", self.timeout))?
+            .map_err(|e| anyhow::anyhow!("Request to upstream failed: {e}"))?;
 
         // Convert response body from Incoming to Full<Bytes>
         let (parts, body) = response.into_parts();
