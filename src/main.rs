@@ -141,6 +141,7 @@ async fn proxy_handler(
     let response_body_bytes_clone = response_body_bytes.clone();
     let db_clone = db.clone();
     let cache_key_clone = cache_key;
+    let request_path_clone = request_path.clone();
 
     // Return response to client immediately
     let mut response_builder = Response::builder().status(parts.status);
@@ -149,16 +150,12 @@ async fn proxy_handler(
     if is_cacheable {
         response_builder = response_builder.header("X-Cache", "MISS");
 
-        // Spawn background task to parse and cache if successful
+        // Spawn background task to parse and cache if eligible
         tokio::task::spawn(async move {
-            if let Ok(json_value) = serde_json::from_slice::<Value>(&response_body_bytes_clone) {
-                // Check if response has "success" field set to true
-                if let Some(success) = json_value.get("success")
-                    && let Some(true) = success.as_bool()
-                {
-                    // Only cache successful responses
-                    let _ = db_clone.put(cache_key_clone, &response_body_bytes_clone);
-                }
+            if let Ok(json_value) = serde_json::from_slice::<Value>(&response_body_bytes_clone)
+                && should_cache_response(&request_path_clone, &json_value)
+            {
+                let _ = db_clone.put(cache_key_clone, &response_body_bytes_clone);
             }
         });
     } else {
@@ -168,6 +165,43 @@ async fn proxy_handler(
     Ok(response_builder
         .body(Full::new(response_body_bytes))
         .unwrap())
+}
+
+/// Check if a response should be cached based on the request path and JSON content.
+///
+/// General rule: Only cache if "success" field is true.
+///
+/// Path-specific rules:
+/// - `/get_coin_record_by_name`: Additionally requires `.coin_record.spent` to be `true`.
+///   This prevents caching unspent coins that might be spent later, which would invalidate the cache.
+fn should_cache_response(request_path: &str, json_value: &Value) -> bool {
+    // First check: response must have "success" field set to true
+    let Some(success) = json_value.get("success") else {
+        return false;
+    };
+    let Some(true) = success.as_bool() else {
+        return false;
+    };
+
+    // Path-specific eligibility checks
+    match request_path {
+        "/get_coin_record_by_name" => {
+            // Only cache if the coin is already spent (spent = true)
+            // Unspent coins (spent = false) can be spent later, making the cache invalid
+            if let Some(coin_record) = json_value.get("coin_record")
+                && let Some(spent) = coin_record.get("spent")
+                && let Some(true) = spent.as_bool()
+            {
+                return true;
+            }
+
+            false
+        }
+        _ => {
+            // For other paths, just check success field (already verified above)
+            true
+        }
+    }
 }
 
 /// Hash input with BLAKE3 and return the first 16 bytes.
