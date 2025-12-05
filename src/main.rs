@@ -2,6 +2,7 @@ mod client;
 mod tls;
 
 use crate::client::BackendClient;
+use clap::{Parser, Subcommand};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::server::conn::http1;
@@ -10,7 +11,7 @@ use hyper::{Request, Response};
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioIo;
-use rocksdb::{DB, Options};
+use rocksdb::{DB, Options, PrefixRange, ReadOptions};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::convert::Infallible;
@@ -22,13 +23,46 @@ use tokio::net::TcpListener;
 type SharedDB = Arc<DB>;
 type CacheAllowlist = Arc<HashSet<String>>;
 
+#[derive(Parser)]
+#[command(name = "chia-caching-proxy")]
+#[command(about = "A caching HTTP proxy for Chia full node RPC requests")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Run the proxy server (default)
+    Serve,
+    /// Fixup the coin cache by removing entries with spent: false
+    FixupCoinCache,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Open rocksdb
+    let cli = Cli::parse();
+
+    match cli.command {
+        Some(Commands::FixupCoinCache) => {
+            fixup_coin_cache()?;
+            Ok(())
+        }
+        Some(Commands::Serve) | None => serve().await,
+    }
+}
+
+/// Open the Rocks DB database
+fn open_db(create_if_missing: bool) -> anyhow::Result<DB> {
     let db_path = std::env::var("ROCKSDB_PATH").unwrap_or_else(|_| "rocksdb".to_string());
     let mut opts = Options::default();
-    opts.create_if_missing(true);
-    let db = Arc::new(DB::open(&opts, &db_path)?);
+    opts.create_if_missing(create_if_missing);
+    Ok(DB::open(&opts, &db_path)?)
+}
+
+async fn serve() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Open rocksdb
+    let db = Arc::new(open_db(true)?);
 
     // Load cache allowlist from environment variable
     let cache_allowlist = Arc::new(load_cache_allowlist());
@@ -230,13 +264,18 @@ fn load_cache_allowlist() -> HashSet<String> {
     }
 }
 
+/// Get the path hash for a given path (first 16 bytes of the cache key)
+fn get_path_hash(path: &str) -> [u8; 16] {
+    blake3_128(path.as_bytes())
+}
+
 /// Build a 32-byte composite key:
 /// [16 bytes path-hash][16 bytes body-hash]
 pub fn build_key(path: &str, body: &Bytes) -> [u8; 32] {
     let mut out = [0u8; 32];
 
     // 1. Hash path (namespace)
-    let path_hash = blake3_128(path.as_bytes());
+    let path_hash = get_path_hash(path);
 
     // 2. Hash body (specific request fingerprint)
     let body_hash = blake3_128(body.as_ref());
@@ -246,4 +285,59 @@ pub fn build_key(path: &str, body: &Bytes) -> [u8; 32] {
     out[16..32].copy_from_slice(&body_hash);
 
     out
+}
+
+/// Fixup the coin cache by removing entries with spent: false
+fn fixup_coin_cache() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Open rocksdb (don't create if missing for fixup)
+    let db = open_db(false)?;
+
+    // Compute the path hash for /get_coin_record_by_name
+    let target_path = "/get_coin_record_by_name";
+    let target_path_hash = get_path_hash(target_path);
+
+    println!("Scanning cache for {target_path} entries...");
+
+    // Use prefix iteration to only scan keys with the matching path hash
+    let mut read_options = ReadOptions::default();
+    read_options.set_iterate_range(PrefixRange(&target_path_hash));
+    let iter = db.iterator_opt(rocksdb::IteratorMode::Start, read_options);
+
+    let mut checked = 0;
+    let mut deleted = 0;
+
+    for item in iter {
+        let (key, value) = item?;
+
+        // All keys from prefix iteration should match, but verify for safety
+        // Keys are 32 bytes: [16 bytes path-hash][16 bytes body-hash]
+        if key.len() == 32 && key[0..16] == target_path_hash {
+            checked += 1;
+
+            // Parse the cached value as JSON
+            if let Ok(json_value) = serde_json::from_slice::<Value>(&value) {
+                // Check if coin_record.spent is false
+                if let Some(coin_record) = json_value.get("coin_record")
+                    && let Some(spent) = coin_record.get("spent")
+                    && let Some(false) = spent.as_bool()
+                {
+                    // Delete this entry
+                    db.delete(&key)?;
+                    deleted += 1;
+                    if deleted % 100 == 0 {
+                        println!("Deleted {deleted} entries so far...");
+                    }
+                }
+            }
+        } else {
+            // Should not happen with prefix iteration, but break if we've gone past our prefix
+            break;
+        }
+    }
+
+    println!(
+        "Fixup complete: checked {checked} entries, deleted {deleted} entries with spent: false"
+    );
+
+    Ok(())
 }
