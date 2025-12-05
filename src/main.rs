@@ -45,8 +45,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Client::builder(hyper_util::rt::TokioExecutor::new()).build::<_, Full<Bytes>>(https);
     let backend_client = Arc::new(BackendClient::new(hyper_client));
 
-    // We create a TcpListener and bind it to 0.0.0.0:3000
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+    // We create a TcpListener and bind it to 0.0.0.0:8555 (or PROXY_LISTEN_PORT env var)
+    let port = std::env::var("PROXY_LISTEN_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(8555);
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = TcpListener::bind(addr).await?;
 
     // Start a loop to continuously accept incoming connections

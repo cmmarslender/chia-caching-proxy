@@ -29,6 +29,9 @@ The proxy can be configured using the following environment variables:
 ### Database Configuration
 - `ROCKSDB_PATH` - Directory path for the RocksDB cache database (default: `rocksdb`)
 
+### Server Configuration
+- `PROXY_LISTEN_PORT` - Port for the proxy server to listen on (default: `8555`)
+
 ### Cache Configuration
 - `CACHE_ALLOWLIST` - Comma-separated list of paths that should be cached. If not set or empty, no paths are cached (opt-in caching). Example: `/get_coin_record_by_name,/get_network_info`
 
@@ -49,7 +52,7 @@ The proxy can be configured using the following environment variables:
 
 ## Usage
 
-The proxy listens on `0.0.0.0:3000` by default. Simply point your Chia RPC clients to the proxy instead of directly to the full node.
+The proxy listens on `0.0.0.0:8555` by default (configurable via the `PROXY_LISTEN_PORT` environment variable). Simply point your Chia RPC clients to the proxy instead of directly to the full node.
 
 Example:
 ```bash
