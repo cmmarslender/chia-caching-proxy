@@ -2,7 +2,7 @@ FROM rust:bookworm AS builder
 WORKDIR /app
 
 RUN apt update && \
-    apt-get install -y libclang-dev && \
+    apt-get install -y build-essential cmake libclang-dev && \
     rm -rf /var/lib/apt/lists/*
 
 COPY . .
