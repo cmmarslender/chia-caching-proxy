@@ -84,11 +84,7 @@ async fn serve() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let backend_client = Arc::new(BackendClient::new(hyper_client));
 
     // Create the proxy RPC client once for reuse
-    let proxy_rpc_client = Arc::new(ProxyRpcClient::new(
-        db.clone(),
-        backend_client.clone(),
-        cache_allowlist.clone(),
-    ));
+    let proxy_rpc_client = Arc::new(ProxyRpcClient::new(backend_client.clone()));
 
     // We create a TcpListener and bind it to 0.0.0.0:8555 (or PROXY_LISTEN_PORT env var)
     let port = std::env::var("PROXY_LISTEN_PORT")
@@ -157,7 +153,7 @@ async fn cached_handler<F, Fut, P, R>(
     handler: F,
 ) -> anyhow::Result<Response<Full<Bytes>>>
 where
-    F: FnOnce(Bytes) -> Fut,
+    F: FnOnce(&str, Bytes) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<Bytes>>,
     P: FnOnce(&str) -> bool,
     R: FnOnce(&str, &Bytes) -> bool + Send + 'static,
@@ -188,7 +184,7 @@ where
     }
 
     // Call the handler with body bytes directly
-    let response_body_bytes = handler(body_bytes).await?;
+    let response_body_bytes = handler(&normalized_path, body_bytes).await?;
 
     // Clone data needed for async caching task
     let response_body_bytes_clone = response_body_bytes.clone();
@@ -237,13 +233,22 @@ async fn proxy_service(
                 db,
                 |_path| true,            // Always cache /get_coin_info requests
                 |_path, _response| true, // Always cache /get_coin_info responses
-                |body_bytes| handle_get_coin_info(body_bytes, proxy_rpc_client.clone()),
+                |_path, body_bytes| handle_get_coin_info(body_bytes, proxy_rpc_client.clone()),
             )
             .await
         }
         _ => {
             // Fall back to proxy handler for all other paths
-            proxy_handler(request, db, backend_client, cache_allowlist).await
+            cached_handler(
+                request,
+                db,
+                |path| !cache_allowlist.is_empty() && cache_allowlist.contains(path),
+                should_cache_response,
+                |path, body_bytes| {
+                    proxy_handler(path.to_string(), body_bytes, backend_client.clone())
+                },
+            )
+            .await
         }
     };
 
@@ -256,91 +261,18 @@ async fn proxy_service(
     }))
 }
 
-/// Internal helper function that handles the core proxy logic with caching
-pub(crate) async fn proxy_handler_internal(
+async fn proxy_handler(
     request_path: String,
     body_bytes: Bytes,
-    db: SharedDB,
     backend_client: Arc<BackendClient>,
-    cache_allowlist: CacheAllowlist,
-) -> anyhow::Result<Response<Full<Bytes>>> {
-    // Normalize path to ensure it starts with / for consistency
-    let normalized_path = if request_path.starts_with('/') {
-        request_path.clone()
-    } else {
-        format!("/{request_path}")
-    };
-
-    // Check if this path is allowed to be cached
-    // Only cache if allowlist is not empty AND path is in the allowlist
-    let is_cacheable = !cache_allowlist.is_empty() && cache_allowlist.contains(&normalized_path);
-    let cache_key = build_key(&normalized_path, &body_bytes);
-
-    if is_cacheable {
-        // Check RocksDB for cached response
-        if let Ok(Some(cached_value)) = db.get(cache_key) {
-            let mut response_builder = Response::builder();
-            response_builder = response_builder.header("Content-Type", "application/json");
-            response_builder = response_builder.header("X-Cache", "HIT");
-            return Ok(response_builder.body(Full::new(Bytes::from(cached_value)))?);
-        }
-    }
-
+) -> anyhow::Result<Bytes> {
     // Make request to backend using the wrapper client (use normalized path)
-    let response = backend_client.request(&normalized_path, body_bytes).await?;
+    let response = backend_client.request(&request_path, body_bytes).await?;
 
     // Extract status and headers from the response
-    let (parts, body) = response.into_parts();
+    let (_parts, body) = response.into_parts();
 
-    // Read the response body
-    let response_body_bytes = body.collect().await?.to_bytes();
-
-    // Clone data needed for async caching task
-    let response_body_bytes_clone = response_body_bytes.clone();
-    let db_clone = db.clone();
-    let cache_key_clone = cache_key;
-
-    // Return response to client immediately
-    let mut response_builder = Response::builder().status(parts.status);
-    response_builder = response_builder.header("Content-Type", "application/json");
-
-    if is_cacheable {
-        response_builder = response_builder.header("X-Cache", "MISS");
-
-        // Spawn background task to parse and cache if eligible
-        let normalized_path_clone = normalized_path.clone();
-        tokio::task::spawn(async move {
-            if let Ok(json_value) = serde_json::from_slice::<Value>(&response_body_bytes_clone)
-                && should_cache_response(&normalized_path_clone, &json_value)
-            {
-                let _ = db_clone.put(cache_key_clone, &response_body_bytes_clone);
-            }
-        });
-    } else {
-        response_builder = response_builder.header("X-Cache", "SKIP");
-    }
-
-    Ok(response_builder
-        .body(Full::new(response_body_bytes))
-        .unwrap())
-}
-
-async fn proxy_handler(
-    request: Request<hyper::body::Incoming>,
-    db: SharedDB,
-    backend_client: Arc<BackendClient>,
-    cache_allowlist: CacheAllowlist,
-) -> anyhow::Result<Response<Full<Bytes>>> {
-    let request_path = request.uri().path().to_owned();
-    let body_bytes = request.collect().await?.to_bytes();
-    proxy_handler_internal(
-        request_path,
-        body_bytes,
-        db,
-        backend_client,
-        cache_allowlist,
-    )
-    .await
+    Ok(body.collect().await?.to_bytes())
 }
 
 /// Check if a response should be cached based on the request path and JSON content.
@@ -350,7 +282,10 @@ async fn proxy_handler(
 /// Path-specific rules:
 /// - `/get_coin_record_by_name`: Additionally requires `.coin_record.spent` to be `true`.
 ///   This prevents caching unspent coins that might be spent later, which would invalidate the cache.
-fn should_cache_response(request_path: &str, json_value: &Value) -> bool {
+fn should_cache_response(request_path: &str, json_bytes: &Bytes) -> bool {
+    let Ok(json_value) = serde_json::from_slice::<Value>(json_bytes) else {
+        return false;
+    };
     // First check: response must have "success" field set to true
     let Some(success) = json_value.get("success") else {
         return false;

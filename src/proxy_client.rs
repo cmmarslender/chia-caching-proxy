@@ -1,34 +1,21 @@
-use crate::proxy_handler_internal;
+use crate::proxy_handler;
 use chia_wallet_sdk::prelude::ChiaRpcClient;
-use http_body_util::BodyExt;
 use hyper::body::Bytes;
-use rocksdb::DB;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
 
-type SharedDB = Arc<DB>;
-type CacheAllowlist = Arc<std::collections::HashSet<String>>;
-
 /// A wrapper around `ChiaRpcClient` that routes all calls through the local proxy
 /// to leverage caching instead of making direct network calls.
 pub struct ProxyRpcClient {
-    db: SharedDB,
     backend_client: Arc<crate::client::BackendClient>,
-    cache_allowlist: CacheAllowlist,
     base_url: String,
 }
 
 impl ProxyRpcClient {
-    pub fn new(
-        db: SharedDB,
-        backend_client: Arc<crate::client::BackendClient>,
-        cache_allowlist: CacheAllowlist,
-    ) -> Self {
+    pub fn new(backend_client: Arc<crate::client::BackendClient>) -> Self {
         Self {
-            db,
             backend_client,
-            cache_allowlist,
             // base_url is required by the trait but not used since we route through proxy internally
             base_url: "http://localhost".to_string(),
         }
@@ -58,18 +45,7 @@ impl ChiaRpcClient for ProxyRpcClient {
         };
 
         // Call the proxy handler internally to get the cached response
-        let response = proxy_handler_internal(
-            path,
-            body_bytes,
-            self.db.clone(),
-            self.backend_client.clone(),
-            self.cache_allowlist.clone(),
-        )
-        .await?;
-
-        // Extract the response body
-        let response_body = response.into_body();
-        let response_bytes = response_body.collect().await?.to_bytes();
+        let response_bytes = proxy_handler(path, body_bytes, self.backend_client.clone()).await?;
 
         // Parse the JSON response into the requested type
         let json_response: R = serde_json::from_slice(&response_bytes)?;
