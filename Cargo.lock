@@ -471,7 +471,6 @@ dependencies = [
  "blake3",
  "chia-wallet-sdk",
  "clap",
- "hex",
  "http-body-util",
  "hyper",
  "hyper-rustls",

@@ -1,5 +1,6 @@
 mod client;
 mod coin_info;
+mod nft_metadata;
 mod proxy_client;
 mod tls;
 

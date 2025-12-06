@@ -1,6 +1,6 @@
+use crate::nft_metadata::NftMetadata;
 use crate::proxy_client::ProxyRpcClient;
 use anyhow::Context;
-use chia_wallet_sdk::chia::puzzles::nft::NftMetadata;
 use chia_wallet_sdk::coinset::ChiaRpcClient;
 use chia_wallet_sdk::driver::Cat;
 use chia_wallet_sdk::prelude::{
