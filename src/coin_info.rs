@@ -56,6 +56,7 @@ struct NftInfoResponse {
 
 #[derive(serde::Serialize, Default)]
 struct GetCoinInfoResponse {
+    success: bool,
     coin_id: Bytes32,
     coin_type: CoinType,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -149,6 +150,7 @@ pub async fn handle_get_coin_info(
         });
     }
 
+    response.success = true;
     let json_body = serde_json::json!(response).to_string();
     Ok(Bytes::from(json_body))
 }
