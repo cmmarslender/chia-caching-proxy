@@ -146,15 +146,21 @@ async fn serve() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 /// Generic cached handler that wraps any handler function with caching logic.
 /// Checks cache before calling handler, returns cached response if found,
 /// and caches the response after returning it (in background).
-/// If wrapped in this handler, the response is ALWAYS cached.
-async fn cached_handler<F, Fut>(
+/// The `request_cacheable` callback determines if a request should be cached based only on the request data.
+/// The `response_cacheable` callback determines if the response is eligible for caching.
+/// Both the request AND response must be eligible for caching to be stored into the cache DB
+async fn cached_handler<F, Fut, P, R>(
     request: Request<hyper::body::Incoming>,
     db: SharedDB,
+    request_cacheable: P,
+    response_cacheable: R,
     handler: F,
 ) -> anyhow::Result<Response<Full<Bytes>>>
 where
     F: FnOnce(Bytes) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<Bytes>>,
+    P: FnOnce(&str) -> bool,
+    R: FnOnce(&str, &Bytes) -> bool + Send + 'static,
 {
     let request_path = request.uri().path();
 
@@ -165,13 +171,16 @@ where
         format!("/{request_path}")
     };
 
+    // Check if this path should be cached
+    let is_cacheable = request_cacheable(&normalized_path);
+
     // Read request body for cache key generation
     let (_, body) = request.into_parts();
     let body_bytes = body.collect().await?.to_bytes();
     let cache_key = build_key(&normalized_path, &body_bytes);
 
-    // Check RocksDB for cached response
-    if let Ok(Some(cached_value)) = db.get(cache_key) {
+    // Check RocksDB for cached response (only if cacheable)
+    if is_cacheable && let Ok(Some(cached_value)) = db.get(cache_key) {
         let mut response_builder = Response::builder();
         response_builder = response_builder.header("Content-Type", "application/json");
         response_builder = response_builder.header("X-Cache", "HIT");
@@ -185,17 +194,26 @@ where
     let response_body_bytes_clone = response_body_bytes.clone();
     let db_clone = db.clone();
     let cache_key_clone = cache_key;
+    let normalized_path_clone = normalized_path.clone();
 
     // Construct and return response to client immediately
-    let response_builder = Response::builder()
+    let mut response_builder = Response::builder()
         .status(200)
-        .header("Content-Type", "application/json")
-        .header("X-Cache", "MISS");
+        .header("Content-Type", "application/json");
 
-    // Spawn background task to cache the response
-    tokio::task::spawn(async move {
-        let _ = db_clone.put(cache_key_clone, &response_body_bytes_clone);
-    });
+    if is_cacheable {
+        response_builder = response_builder.header("X-Cache", "MISS");
+
+        // Spawn background task to cache the response
+        // Move response_cacheable into the task
+        tokio::task::spawn(async move {
+            if response_cacheable(&normalized_path_clone, &response_body_bytes_clone) {
+                let _ = db_clone.put(cache_key_clone, &response_body_bytes_clone);
+            }
+        });
+    } else {
+        response_builder = response_builder.header("X-Cache", "SKIP");
+    }
 
     Ok(response_builder
         .body(Full::new(response_body_bytes))
@@ -214,9 +232,13 @@ async fn proxy_service(
     // Route to appropriate handler based on path
     let result = match request_path {
         "/get_coin_info" => {
-            cached_handler(request, db, |body_bytes| {
-                handle_get_coin_info(body_bytes, proxy_rpc_client.clone())
-            })
+            cached_handler(
+                request,
+                db,
+                |_path| true,            // Always cache /get_coin_info requests
+                |_path, _response| true, // Always cache /get_coin_info responses
+                |body_bytes| handle_get_coin_info(body_bytes, proxy_rpc_client.clone()),
+            )
             .await
         }
         _ => {
