@@ -1,4 +1,5 @@
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::crypto::aws_lc_rs;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 use rustls_pemfile::{certs, pkcs8_private_keys};
@@ -101,7 +102,11 @@ pub fn make_client_config(
 ) -> anyhow::Result<ClientConfig> {
     let root = RootCertStore::empty();
 
-    let mut cfg = ClientConfig::builder()
+    // Get the AWS-LC crypto provider
+    let provider = Arc::new(aws_lc_rs::default_provider());
+
+    let mut cfg = ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
         .with_root_certificates(root)
         .with_client_auth_cert(cert_chain, key)?;
 

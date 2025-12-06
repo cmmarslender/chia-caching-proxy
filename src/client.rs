@@ -44,7 +44,14 @@ impl BackendClient {
         path: &str,
         body: Bytes,
     ) -> anyhow::Result<Response<Full<Bytes>>> {
-        let uri = format!("https://{}:{}{}", self.host, self.port, path).parse::<Uri>()?;
+        // Ensure path starts with /
+        let normalized_path = if path.starts_with('/') {
+            path
+        } else {
+            return Err(anyhow::anyhow!("Path must start with /, got: {path}"));
+        };
+        let uri =
+            format!("https://{}:{}{}", self.host, self.port, normalized_path).parse::<Uri>()?;
         let mut request_builder = Request::builder().method(Method::POST).uri(uri);
 
         // Copy headers from the original request

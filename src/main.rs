@@ -1,7 +1,11 @@
 mod client;
+mod coin_info;
+mod proxy_client;
 mod tls;
 
 use crate::client::BackendClient;
+use crate::coin_info::handle_get_coin_info;
+use crate::proxy_client::ProxyRpcClient;
 use clap::{Parser, Subcommand};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
@@ -79,6 +83,13 @@ async fn serve() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Client::builder(hyper_util::rt::TokioExecutor::new()).build::<_, Full<Bytes>>(https);
     let backend_client = Arc::new(BackendClient::new(hyper_client));
 
+    // Create the proxy RPC client once for reuse
+    let proxy_rpc_client = Arc::new(ProxyRpcClient::new(
+        db.clone(),
+        backend_client.clone(),
+        cache_allowlist.clone(),
+    ));
+
     // We create a TcpListener and bind it to 0.0.0.0:8555 (or PROXY_LISTEN_PORT env var)
     let port = std::env::var("PROXY_LISTEN_PORT")
         .ok()
@@ -99,6 +110,7 @@ async fn serve() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let db = db.clone();
         let backend_client = backend_client.clone();
         let cache_allowlist = cache_allowlist.clone();
+        let proxy_rpc_client = proxy_rpc_client.clone();
 
         // Spawn a tokio task to serve multiple connections concurrently
         tokio::task::spawn(async move {
@@ -110,7 +122,17 @@ async fn serve() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         let db = db.clone();
                         let backend_client = backend_client.clone();
                         let cache_allowlist = cache_allowlist.clone();
-                        async move { proxy_service(req, db, backend_client, cache_allowlist).await }
+                        let proxy_rpc_client = proxy_rpc_client.clone();
+                        async move {
+                            proxy_service(
+                                req,
+                                db,
+                                backend_client,
+                                cache_allowlist,
+                                proxy_rpc_client,
+                            )
+                            .await
+                        }
                     }),
                 )
                 .await
@@ -121,36 +143,116 @@ async fn serve() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 }
 
+/// Generic cached handler that wraps any handler function with caching logic.
+/// Checks cache before calling handler, returns cached response if found,
+/// and caches the response after returning it (in background).
+/// If wrapped in this handler, the response is ALWAYS cached.
+async fn cached_handler<F, Fut>(
+    request: Request<hyper::body::Incoming>,
+    db: SharedDB,
+    handler: F,
+) -> anyhow::Result<Response<Full<Bytes>>>
+where
+    F: FnOnce(Bytes) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<Bytes>>,
+{
+    let request_path = request.uri().path();
+
+    // Normalize path to ensure it starts with / for consistency
+    let normalized_path = if request_path.starts_with('/') {
+        request_path.to_string()
+    } else {
+        format!("/{request_path}")
+    };
+
+    // Read request body for cache key generation
+    let (_, body) = request.into_parts();
+    let body_bytes = body.collect().await?.to_bytes();
+    let cache_key = build_key(&normalized_path, &body_bytes);
+
+    // Check RocksDB for cached response
+    if let Ok(Some(cached_value)) = db.get(cache_key) {
+        let mut response_builder = Response::builder();
+        response_builder = response_builder.header("Content-Type", "application/json");
+        response_builder = response_builder.header("X-Cache", "HIT");
+        return Ok(response_builder.body(Full::new(Bytes::from(cached_value)))?);
+    }
+
+    // Call the handler with body bytes directly
+    let response_body_bytes = handler(body_bytes).await?;
+
+    // Clone data needed for async caching task
+    let response_body_bytes_clone = response_body_bytes.clone();
+    let db_clone = db.clone();
+    let cache_key_clone = cache_key;
+
+    // Construct and return response to client immediately
+    let response_builder = Response::builder()
+        .status(200)
+        .header("Content-Type", "application/json")
+        .header("X-Cache", "MISS");
+
+    // Spawn background task to cache the response
+    tokio::task::spawn(async move {
+        let _ = db_clone.put(cache_key_clone, &response_body_bytes_clone);
+    });
+
+    Ok(response_builder
+        .body(Full::new(response_body_bytes))
+        .unwrap())
+}
+
 async fn proxy_service(
     request: Request<hyper::body::Incoming>,
     db: SharedDB,
     backend_client: Arc<BackendClient>,
     cache_allowlist: CacheAllowlist,
+    proxy_rpc_client: Arc<ProxyRpcClient>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
-    Ok(proxy_handler(request, db, backend_client, cache_allowlist)
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!("Proxy Error: {e}");
-            Response::builder()
-                .status(500)
-                .body(Full::from("internal error"))
-                .unwrap()
-        }))
+    let request_path = request.uri().path();
+
+    // Route to appropriate handler based on path
+    let result = match request_path {
+        "/get_coin_info" => {
+            cached_handler(request, db, |body_bytes| {
+                handle_get_coin_info(body_bytes, proxy_rpc_client.clone())
+            })
+            .await
+        }
+        _ => {
+            // Fall back to proxy handler for all other paths
+            proxy_handler(request, db, backend_client, cache_allowlist).await
+        }
+    };
+
+    Ok(result.unwrap_or_else(|e| {
+        eprintln!("Proxy Error: {e}");
+        Response::builder()
+            .status(500)
+            .body(Full::from("internal error"))
+            .unwrap()
+    }))
 }
 
-async fn proxy_handler(
-    request: Request<hyper::body::Incoming>,
+/// Internal helper function that handles the core proxy logic with caching
+pub(crate) async fn proxy_handler_internal(
+    request_path: String,
+    body_bytes: Bytes,
     db: SharedDB,
     backend_client: Arc<BackendClient>,
     cache_allowlist: CacheAllowlist,
 ) -> anyhow::Result<Response<Full<Bytes>>> {
-    let request_path = request.uri().path().to_owned();
-    let body_bytes = request.collect().await?.to_bytes();
+    // Normalize path to ensure it starts with / for consistency
+    let normalized_path = if request_path.starts_with('/') {
+        request_path.clone()
+    } else {
+        format!("/{request_path}")
+    };
 
     // Check if this path is allowed to be cached
     // Only cache if allowlist is not empty AND path is in the allowlist
-    let is_cacheable = !cache_allowlist.is_empty() && cache_allowlist.contains(&request_path);
-    let cache_key = build_key(&request_path, &body_bytes);
+    let is_cacheable = !cache_allowlist.is_empty() && cache_allowlist.contains(&normalized_path);
+    let cache_key = build_key(&normalized_path, &body_bytes);
 
     if is_cacheable {
         // Check RocksDB for cached response
@@ -162,8 +264,8 @@ async fn proxy_handler(
         }
     }
 
-    // Make request to backend using the wrapper client
-    let response = backend_client.request(&request_path, body_bytes).await?;
+    // Make request to backend using the wrapper client (use normalized path)
+    let response = backend_client.request(&normalized_path, body_bytes).await?;
 
     // Extract status and headers from the response
     let (parts, body) = response.into_parts();
@@ -175,7 +277,6 @@ async fn proxy_handler(
     let response_body_bytes_clone = response_body_bytes.clone();
     let db_clone = db.clone();
     let cache_key_clone = cache_key;
-    let request_path_clone = request_path.clone();
 
     // Return response to client immediately
     let mut response_builder = Response::builder().status(parts.status);
@@ -185,9 +286,10 @@ async fn proxy_handler(
         response_builder = response_builder.header("X-Cache", "MISS");
 
         // Spawn background task to parse and cache if eligible
+        let normalized_path_clone = normalized_path.clone();
         tokio::task::spawn(async move {
             if let Ok(json_value) = serde_json::from_slice::<Value>(&response_body_bytes_clone)
-                && should_cache_response(&request_path_clone, &json_value)
+                && should_cache_response(&normalized_path_clone, &json_value)
             {
                 let _ = db_clone.put(cache_key_clone, &response_body_bytes_clone);
             }
@@ -199,6 +301,24 @@ async fn proxy_handler(
     Ok(response_builder
         .body(Full::new(response_body_bytes))
         .unwrap())
+}
+
+async fn proxy_handler(
+    request: Request<hyper::body::Incoming>,
+    db: SharedDB,
+    backend_client: Arc<BackendClient>,
+    cache_allowlist: CacheAllowlist,
+) -> anyhow::Result<Response<Full<Bytes>>> {
+    let request_path = request.uri().path().to_owned();
+    let body_bytes = request.collect().await?.to_bytes();
+    proxy_handler_internal(
+        request_path,
+        body_bytes,
+        db,
+        backend_client,
+        cache_allowlist,
+    )
+    .await
 }
 
 /// Check if a response should be cached based on the request path and JSON content.
@@ -265,8 +385,16 @@ fn load_cache_allowlist() -> HashSet<String> {
 }
 
 /// Get the path hash for a given path (first 16 bytes of the cache key)
+/// Normalizes the path to ensure it starts with / for cache consistency
 fn get_path_hash(path: &str) -> [u8; 16] {
-    blake3_128(path.as_bytes())
+    // Normalize path to always start with / for cache consistency
+    let normalized_path = if path.starts_with('/') {
+        path
+    } else {
+        // This shouldn't happen in practice, but handle it for safety
+        return blake3_128(format!("/{path}").as_bytes());
+    };
+    blake3_128(normalized_path.as_bytes())
 }
 
 /// Build a 32-byte composite key:
