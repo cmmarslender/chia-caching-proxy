@@ -6,6 +6,7 @@ mod wallet_sdk_extensions;
 
 use clap::{Parser, Subcommand};
 use client::BackendClient;
+use dialoguer::Confirm;
 use handlers::get_coin_info::handle_get_coin_info;
 use handlers::proxy_handler::proxy_handler;
 use http_body_util::{BodyExt, Full};
@@ -47,9 +48,10 @@ enum Commands {
     ClearEndpointCache {
         /// The endpoint path to clear (e.g., `"/get_coin_info"` or `"get_coin_info"`)
         path: String,
+        /// Optional request body JSON. If provided, only clears cache for this specific request.
+        /// If not provided, clears all cache entries for the endpoint.
+        body: Option<String>,
     },
-    /// Clear cache for a particular endpoint/request body combination
-    ClearRequestCache,
 }
 
 #[tokio::main]
@@ -61,11 +63,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             fixup_coin_cache()?;
             Ok(())
         }
-        Some(Commands::ClearEndpointCache { path }) => {
-            clear_endpoint_cache(&path)?;
+        Some(Commands::ClearEndpointCache { path, body }) => {
+            clear_endpoint_cache(&path, body.as_deref())?;
             Ok(())
         }
-        Some(Commands::ClearRequestCache) => Ok(()),
         Some(Commands::Serve) | None => serve().await,
     }
 }
@@ -373,45 +374,81 @@ pub fn build_key(path: &str, body: &Bytes) -> [u8; 32] {
     out
 }
 
-/// Clear cache for a particular endpoint by deleting all entries with the path prefix
-fn clear_endpoint_cache(path: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+/// Clear cache for a particular endpoint by deleting all entries with the path prefix,
+/// or a specific entry if body is provided.
+fn clear_endpoint_cache(
+    path: &str,
+    body: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Open rocksdb (don't create if missing)
     let db = open_db(false)?;
 
     // Normalize path to ensure it starts with / for consistency
     let normalized_path = normalize_path(path);
 
-    // Get the path hash for the normalized path
-    let path_hash = get_path_hash(&normalized_path);
+    if let Some(body_str) = body {
+        // Clear specific request cache entry
+        let body_bytes = Bytes::from(body_str.as_bytes().to_vec());
+        let cache_key = build_key(&normalized_path, &body_bytes);
 
-    println!("Clearing cache for endpoint: {normalized_path}");
-
-    // Use prefix iteration to only scan keys with the matching path hash
-    let mut read_options = ReadOptions::default();
-    read_options.set_iterate_range(PrefixRange(&path_hash));
-    let iter = db.iterator_opt(rocksdb::IteratorMode::Start, read_options);
-
-    let mut deleted = 0;
-
-    for item in iter {
-        let (key, _) = item?;
-
-        // All keys from prefix iteration should match, but verify for safety
-        // Keys are 32 bytes: [16 bytes path-hash][16 bytes body-hash]
-        if key.len() == 32 && key[0..16] == path_hash {
-            // Delete this entry
-            db.delete(&key)?;
-            deleted += 1;
-            if deleted % 100 == 0 {
-                println!("Deleted {deleted} entries so far...");
+        if Confirm::new()
+            .with_prompt(format!(
+                "Will delete request with path {normalized_path} and body {body_str}"
+            ))
+            .interact()?
+        {
+            // Check if the key exists and delete
+            if db.get(cache_key)?.is_some() {
+                db.delete(cache_key)?;
+                println!("Cache entry deleted successfully.");
+            } else {
+                println!(
+                    "No cache entry found for endpoint {normalized_path} with the provided request body."
+                );
             }
         } else {
-            // Should not happen with prefix iteration, but break if we've gone past our prefix
-            break;
+            println!("Cancelled.");
+        }
+    } else {
+        // Clear all entries for this endpoint
+        let path_hash = get_path_hash(&normalized_path);
+
+        if Confirm::new()
+            .with_prompt(format!(
+                "Will delete all requests with path {normalized_path}"
+            ))
+            .interact()?
+        {
+            // Use prefix iteration to only scan keys with the matching path hash
+            let mut read_options = ReadOptions::default();
+            read_options.set_iterate_range(PrefixRange(&path_hash));
+            let iter = db.iterator_opt(rocksdb::IteratorMode::Start, read_options);
+
+            let mut deleted = 0;
+
+            for item in iter {
+                let (key, _) = item?;
+
+                // All keys from prefix iteration should match, but verify for safety
+                // Keys are 32 bytes: [16 bytes path-hash][16 bytes body-hash]
+                if key.len() == 32 && key[0..16] == path_hash {
+                    // Delete this entry
+                    db.delete(&key)?;
+                    deleted += 1;
+                    if deleted % 100 == 0 {
+                        println!("Deleted {deleted} entries so far...");
+                    }
+                } else {
+                    // Should not happen with prefix iteration, but break if we've gone past our prefix
+                    break;
+                }
+            }
+
+            println!("Cache clear complete: deleted {deleted} entries for {normalized_path}");
+        } else {
+            println!("Cancelled.");
         }
     }
-
-    println!("Cache clear complete: deleted {deleted} entries for {normalized_path}");
 
     Ok(())
 }
