@@ -54,6 +54,8 @@ The proxy can be configured using the following environment variables:
 
 The proxy listens on `0.0.0.0:8555` by default (configurable via the `PROXY_LISTEN_PORT` environment variable). Simply point your Chia RPC clients to the proxy instead of directly to the full node.
 
+### Running the Proxy
+
 Example:
 ```bash
 # Set environment variables
@@ -63,8 +65,23 @@ export UPSTREAM_TIMEOUT_SECONDS=30
 export ROCKSDB_PATH=/var/cache/chia-proxy
 export CACHE_ALLOWLIST=/get_coin_record_by_name,/get_network_info
 
-# Run the proxy
+# Run the proxy (default command)
 cargo run
+# Or explicitly:
+cargo run -- serve
+```
+
+### CLI Commands
+
+The proxy supports the following commands:
+
+- `serve` (default) - Run the proxy server
+- `fixup-coin-cache` - Maintenance command to clean up the cache by removing entries for `/get_coin_record_by_name` where `spent: false`. This is useful if the cache contains unspent coins that were cached before the path-specific caching rules were implemented.
+
+Example:
+```bash
+# Run the fixup command
+cargo run -- fixup-coin-cache
 ```
 
 ### Cache Behavior
@@ -81,4 +98,24 @@ The proxy uses an opt-in caching model with success validation:
 This means error responses (even with HTTP 200 status) are never cached. The response is returned to the client immediately, and JSON parsing and caching happen asynchronously in the background, ensuring minimal latency.
 
 All requests are still proxied to the backend regardless of cache configuration.
+
+### Special Endpoints
+
+#### `/get_coin_info`
+
+The `/get_coin_info` endpoint is a special enhanced endpoint that:
+- Always caches responses (not controlled by `CACHE_ALLOWLIST`)
+- Provides enriched coin information including CAT2 and NFT metadata
+- Parses parent coin puzzles to extract asset information
+- Returns structured data with `coin_type`, `cat_info`, and `nft_info` fields
+
+This endpoint is useful for applications that need detailed coin information without making multiple RPC calls.
+
+### Path-Specific Caching Rules
+
+Some endpoints have additional caching eligibility rules beyond the basic success check:
+
+- **`/get_coin_record_by_name`**: Only caches responses where `coin_record.spent` is `true`. Unspent coins (`spent: false`) are not cached because they can be spent later, which would invalidate the cache. This prevents stale cache entries for coins that may change state.
+
+All other cacheable paths follow the standard success-based caching rules.
 
