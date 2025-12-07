@@ -1,5 +1,5 @@
-use crate::nft_metadata::NftMetadata;
 use crate::proxy_client::ProxyRpcClient;
+use crate::wallet_sdk_extensions::nft_metadata::NftMetadata;
 use anyhow::Context;
 use chia_caching_proxy::coin_info::{
     CatInfoResponse, CoinType, GetCoinInfoRequest, GetCoinInfoResponse, NftInfoResponse,

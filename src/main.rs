@@ -1,8 +1,8 @@
 mod client;
 mod handlers;
-mod nft_metadata;
 mod proxy_client;
 mod tls;
+mod wallet_sdk_extensions;
 
 use clap::{Parser, Subcommand};
 use client::BackendClient;
