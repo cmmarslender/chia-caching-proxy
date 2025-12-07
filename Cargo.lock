@@ -471,6 +471,9 @@ dependencies = [
  "blake3",
  "chia-wallet-sdk",
  "clap",
+ "clvm-traits 0.32.0",
+ "hex",
+ "hex-literal 1.1.0",
  "http-body-util",
  "hyper",
  "hyper-rustls",
@@ -515,7 +518,7 @@ dependencies = [
  "clvm-utils",
  "clvmr",
  "hex",
- "hex-literal",
+ "hex-literal 0.4.1",
  "thiserror 1.0.69",
 ]
 
@@ -580,7 +583,7 @@ dependencies = [
  "clvm-traits 0.32.0",
  "clvm-utils",
  "clvmr",
- "hex-literal",
+ "hex-literal 0.4.1",
  "num-bigint",
 ]
 
@@ -591,7 +594,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "553363ce9550cfde0ae1306a0a79bf9afd36ea09e0222b874b6287b44ad9d178"
 dependencies = [
  "hex",
- "hex-literal",
+ "hex-literal 0.4.1",
 ]
 
 [[package]]
@@ -623,7 +626,7 @@ checksum = "cb4a45b40a4c5f4366ed777e912be627112ff081ea4ffc7d730f59730199c65b"
 dependencies = [
  "chia-protocol",
  "hex",
- "hex-literal",
+ "hex-literal 0.4.1",
  "reqwest",
  "serde",
  "serde_json",
@@ -664,7 +667,7 @@ dependencies = [
  "clvmr",
  "getrandom 0.3.4",
  "hex",
- "hex-literal",
+ "hex-literal 0.4.1",
  "indexmap",
  "num-bigint",
  "rand 0.9.2",
@@ -739,7 +742,7 @@ dependencies = [
  "clvm-traits 0.32.0",
  "clvm-utils",
  "clvmr",
- "hex-literal",
+ "hex-literal 0.4.1",
  "rue-compiler",
  "rue-lir",
  "rue-options",
@@ -1038,7 +1041,7 @@ dependencies = [
  "clvm-traits 0.32.0",
  "clvmr",
  "hex",
- "hex-literal",
+ "hex-literal 0.4.1",
 ]
 
 [[package]]
@@ -1052,7 +1055,7 @@ dependencies = [
  "chia-bls 0.28.2",
  "chia-sha2 0.28.2",
  "hex",
- "hex-literal",
+ "hex-literal 0.4.1",
  "k256",
  "lazy_static",
  "num-bigint",
@@ -1668,6 +1671,12 @@ name = "hex-literal"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6fe2267d4ed49bc07b63801559be28c718ea06c4738b7a03c94df7386d2cde46"
+
+[[package]]
+name = "hex-literal"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e712f64ec3850b98572bffac52e2c6f282b29fe6c5fa6d42334b30be438d95c1"
 
 [[package]]
 name = "hkdf"

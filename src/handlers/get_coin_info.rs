@@ -1,4 +1,6 @@
 use crate::proxy_client::ProxyRpcClient;
+use crate::wallet_sdk_extensions::cat1::Cat1;
+use crate::wallet_sdk_extensions::cat1_info::Cat1Info;
 use crate::wallet_sdk_extensions::nft_metadata::NftMetadata;
 use anyhow::Context;
 use chia_caching_proxy::coin_info::{
@@ -92,6 +94,30 @@ pub async fn handle_get_coin_info(
             edition_total: metadata.edition_total,
             license_uris: metadata.license_uris,
             owner_did: nft_info.current_owner,
+        });
+    }
+
+    if let Some((parent_cat_info, _puzzle)) = Cat1Info::parse(&allocator, parent_puzzle)? {
+        let cat_children = Cat1::parse_children(
+            &mut allocator,
+            parent_coin_spend.coin,
+            parent_puzzle,
+            parent_solution_ptr,
+        )?
+        .context("Parent CAT has no children")?;
+        let child_cat = cat_children
+            .iter()
+            .find(|cat| cat.coin.coin_id() == request_data.name)
+            .context("Could not find CAT from its parent")?;
+
+        response.coin_type = CoinType::Cat1;
+        response.cat_info = Some(CatInfoResponse {
+            asset_id: parent_cat_info.asset_id,
+            from_puzzle_hash: parent_cat_info.p2_puzzle_hash,
+            from_address: Address::new(parent_cat_info.p2_puzzle_hash, "xch".to_string())
+                .encode()?,
+            to_puzzle_hash: child_cat.info.p2_puzzle_hash,
+            to_address: Address::new(child_cat.info.p2_puzzle_hash, "xch".to_string()).encode()?,
         });
     }
 
