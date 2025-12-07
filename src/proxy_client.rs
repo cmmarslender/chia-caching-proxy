@@ -1,4 +1,4 @@
-use crate::proxy_handler;
+use crate::handlers::proxy_handler;
 use chia_wallet_sdk::prelude::ChiaRpcClient;
 use hyper::body::Bytes;
 use serde::Serialize;
@@ -45,7 +45,8 @@ impl ChiaRpcClient for ProxyRpcClient {
         };
 
         // Call the proxy handler internally to get the cached response
-        let response_bytes = proxy_handler(path, body_bytes, self.backend_client.clone()).await?;
+        let response_bytes =
+            proxy_handler::proxy_handler(path, body_bytes, self.backend_client.clone()).await?;
 
         // Parse the JSON response into the requested type
         let json_response: R = serde_json::from_slice(&response_bytes)?;

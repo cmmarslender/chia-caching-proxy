@@ -1,13 +1,13 @@
 mod client;
-mod coin_info;
+mod handlers;
 mod nft_metadata;
 mod proxy_client;
 mod tls;
 
-use crate::client::BackendClient;
-use crate::coin_info::handle_get_coin_info;
-use crate::proxy_client::ProxyRpcClient;
 use clap::{Parser, Subcommand};
+use client::BackendClient;
+use handlers::get_coin_info::handle_get_coin_info;
+use handlers::proxy_handler::proxy_handler;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::server::conn::http1;
@@ -16,6 +16,7 @@ use hyper::{Request, Response};
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioIo;
+use proxy_client::ProxyRpcClient;
 use rocksdb::{DB, Options, PrefixRange, ReadOptions};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -260,20 +261,6 @@ async fn proxy_service(
             .body(Full::from("internal error"))
             .unwrap()
     }))
-}
-
-async fn proxy_handler(
-    request_path: String,
-    body_bytes: Bytes,
-    backend_client: Arc<BackendClient>,
-) -> anyhow::Result<Bytes> {
-    // Make request to backend using the wrapper client (use normalized path)
-    let response = backend_client.request(&request_path, body_bytes).await?;
-
-    // Extract status and headers from the response
-    let (_parts, body) = response.into_parts();
-
-    Ok(body.collect().await?.to_bytes())
 }
 
 /// Check if a response should be cached based on the request path and JSON content.
