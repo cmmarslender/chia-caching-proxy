@@ -65,7 +65,7 @@ mod tests {
     };
     use chia_wallet_sdk::chia::puzzles::standard::StandardArgs;
     use chia_wallet_sdk::clvmr::serde::node_from_bytes;
-    use chia_wallet_sdk::prelude::{Allocator, tree_hash, PublicKey};
+    use chia_wallet_sdk::prelude::{Allocator, PublicKey, tree_hash};
     use chia_wallet_sdk::puzzles::{
         EVERYTHING_WITH_SIGNATURE, GENESIS_BY_COIN_ID, P2_DELEGATED_PUZZLE_OR_HIDDEN_PUZZLE,
     };

@@ -43,6 +43,13 @@ enum Commands {
     Serve,
     /// Fixup the coin cache by removing entries with spent: false
     FixupCoinCache,
+    /// Clear cache for a particular endpoint
+    ClearEndpointCache {
+        /// The endpoint path to clear (e.g., `"/get_coin_info"` or `"get_coin_info"`)
+        path: String,
+    },
+    /// Clear cache for a particular endpoint/request body combination
+    ClearRequestCache,
 }
 
 #[tokio::main]
@@ -54,6 +61,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             fixup_coin_cache()?;
             Ok(())
         }
+        Some(Commands::ClearEndpointCache { path }) => {
+            clear_endpoint_cache(&path)?;
+            Ok(())
+        }
+        Some(Commands::ClearRequestCache) => Ok(()),
         Some(Commands::Serve) | None => serve().await,
     }
 }
@@ -163,11 +175,7 @@ where
     let request_path = request.uri().path();
 
     // Normalize path to ensure it starts with / for consistency
-    let normalized_path = if request_path.starts_with('/') {
-        request_path.to_string()
-    } else {
-        format!("/{request_path}")
-    };
+    let normalized_path = normalize_path(request_path);
 
     // Check if this path should be cached
     let is_cacheable = request_cacheable(&normalized_path);
@@ -310,6 +318,17 @@ fn blake3_128(input: &[u8]) -> [u8; 16] {
     truncated.try_into().unwrap() // [u8; 16]
 }
 
+/// Normalize a path to ensure it starts with / for consistency.
+/// If the path already starts with /, it's returned as-is.
+/// Otherwise, a leading / is prepended.
+fn normalize_path(path: &str) -> String {
+    if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    }
+}
+
 /// Load cache allowlist from environment variable.
 /// If `CACHE_ALLOWLIST` is set, it should be a comma-separated list of paths.
 /// If empty or not set, no paths are cacheable (empty allowlist = cache nothing).
@@ -332,13 +351,7 @@ fn load_cache_allowlist() -> HashSet<String> {
 /// Get the path hash for a given path (first 16 bytes of the cache key)
 /// Normalizes the path to ensure it starts with / for cache consistency
 fn get_path_hash(path: &str) -> [u8; 16] {
-    // Normalize path to always start with / for cache consistency
-    let normalized_path = if path.starts_with('/') {
-        path
-    } else {
-        // This shouldn't happen in practice, but handle it for safety
-        return blake3_128(format!("/{path}").as_bytes());
-    };
+    let normalized_path = normalize_path(path);
     blake3_128(normalized_path.as_bytes())
 }
 
@@ -358,6 +371,49 @@ pub fn build_key(path: &str, body: &Bytes) -> [u8; 32] {
     out[16..32].copy_from_slice(&body_hash);
 
     out
+}
+
+/// Clear cache for a particular endpoint by deleting all entries with the path prefix
+fn clear_endpoint_cache(path: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Open rocksdb (don't create if missing)
+    let db = open_db(false)?;
+
+    // Normalize path to ensure it starts with / for consistency
+    let normalized_path = normalize_path(path);
+
+    // Get the path hash for the normalized path
+    let path_hash = get_path_hash(&normalized_path);
+
+    println!("Clearing cache for endpoint: {normalized_path}");
+
+    // Use prefix iteration to only scan keys with the matching path hash
+    let mut read_options = ReadOptions::default();
+    read_options.set_iterate_range(PrefixRange(&path_hash));
+    let iter = db.iterator_opt(rocksdb::IteratorMode::Start, read_options);
+
+    let mut deleted = 0;
+
+    for item in iter {
+        let (key, _) = item?;
+
+        // All keys from prefix iteration should match, but verify for safety
+        // Keys are 32 bytes: [16 bytes path-hash][16 bytes body-hash]
+        if key.len() == 32 && key[0..16] == path_hash {
+            // Delete this entry
+            db.delete(&key)?;
+            deleted += 1;
+            if deleted % 100 == 0 {
+                println!("Deleted {deleted} entries so far...");
+            }
+        } else {
+            // Should not happen with prefix iteration, but break if we've gone past our prefix
+            break;
+        }
+    }
+
+    println!("Cache clear complete: deleted {deleted} entries for {normalized_path}");
+
+    Ok(())
 }
 
 /// Fixup the coin cache by removing entries with spent: false
