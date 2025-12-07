@@ -77,12 +77,23 @@ The proxy supports the following commands:
 
 - `serve` (default) - Run the proxy server
 - `fixup-coin-cache` - Maintenance command to clean up the cache by removing entries for `/get_coin_record_by_name` where `spent: false`. This is useful if the cache contains unspent coins that were cached before the path-specific caching rules were implemented.
+- `clear-endpoint-cache` - Clear cache entries for a specific endpoint. Can clear all entries for an endpoint or a specific request.
 
-Example:
+Examples:
 ```bash
 # Run the fixup command
 cargo run -- fixup-coin-cache
+
+# Clear all cache entries for an endpoint
+cargo run -- clear-endpoint-cache /get_coin_info
+# Or without leading slash
+cargo run -- clear-endpoint-cache get_coin_info
+
+# Clear cache for a specific endpoint + request body combination
+cargo run -- clear-endpoint-cache /get_coin_info '{"coin_name":"0x123..."}'
 ```
+
+**Note**: The `clear-endpoint-cache` command will prompt for confirmation before deleting any cache entries. The path will be normalized (leading `/` added if missing) automatically.
 
 ### Cache Behavior
 
