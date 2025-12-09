@@ -19,3 +19,4 @@ jobs:
     with:
       docker-platforms: 'linux/amd64'
       enable-cache: 'true'
+      report-image-size: 'true'
