@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   package:
-    uses: Chia-Network/actions/.github/workflows/docker-build.yaml@docker-registry-caching
+    uses: Chia-Network/actions/.github/workflows/docker-build.yaml@7e02505e810d2010ecd4e051c827ddec1c3c5090
     with:
       docker-platforms: 'linux/amd64'
       enable-cache: 'true'
