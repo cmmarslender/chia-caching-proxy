@@ -24,6 +24,7 @@ use std::collections::HashSet;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use anyhow::Context;
 use tokio::net::TcpListener;
 
 // Type alias for convenience
@@ -76,7 +77,7 @@ fn open_db(create_if_missing: bool) -> anyhow::Result<DB> {
     let db_path = std::env::var("ROCKSDB_PATH").unwrap_or_else(|_| "rocksdb".to_string());
     let mut opts = Options::default();
     opts.create_if_missing(create_if_missing);
-    Ok(DB::open(&opts, &db_path)?)
+    Ok(DB::open(&opts, &db_path).context("Could not open database")?)
 }
 
 async fn serve() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -87,7 +88,7 @@ async fn serve() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cache_allowlist = Arc::new(load_cache_allowlist());
 
     // Create a shared hyper client
-    let (cert, key) = tls::load_chia_certs()?;
+    let (cert, key) = tls::load_chia_certs().context("Could not load chia-certificates")?;
     let tls_config = tls::make_client_config(cert, key)?;
     let https = HttpsConnectorBuilder::new()
         .with_tls_config(tls_config)
