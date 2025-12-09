@@ -15,8 +15,7 @@ permissions:
 
 jobs:
   package:
-    uses: Chia-Network/actions/.github/workflows/docker-build.yaml@7e02505e810d2010ecd4e051c827ddec1c3c5090
+    uses: Chia-Network/actions/.github/workflows/docker-build.yaml@main
     with:
       docker-platforms: 'linux/amd64'
       enable-cache: 'true'
-      report-image-size: 'true'
