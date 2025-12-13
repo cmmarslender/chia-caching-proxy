@@ -22,3 +22,5 @@ chia-wallet-sdk = { version = "0.32.0", features = ["rustls"] }
 hex = "0.4.3"
 hex-literal = "1.1.0"
 clvm-traits = "0.32.0"
+log = "0.4.29"
+env_logger = "0.11.8"

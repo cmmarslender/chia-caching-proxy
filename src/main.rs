@@ -4,6 +4,7 @@ mod proxy_client;
 mod tls;
 mod wallet_sdk_extensions;
 
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use client::BackendClient;
 use dialoguer::Confirm;
@@ -24,7 +25,6 @@ use std::collections::HashSet;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use anyhow::Context;
 use tokio::net::TcpListener;
 
 // Type alias for convenience
@@ -57,6 +57,7 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    env_logger::init();
     let cli = Cli::parse();
 
     match cli.command {
@@ -77,7 +78,7 @@ fn open_db(create_if_missing: bool) -> anyhow::Result<DB> {
     let db_path = std::env::var("ROCKSDB_PATH").unwrap_or_else(|_| "rocksdb".to_string());
     let mut opts = Options::default();
     opts.create_if_missing(create_if_missing);
-    Ok(DB::open(&opts, &db_path).context("Could not open database")?)
+    DB::open(&opts, &db_path).context("Could not open database")
 }
 
 async fn serve() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
