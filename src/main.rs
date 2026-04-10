@@ -238,13 +238,51 @@ async fn proxy_service(
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     let request_path = request.uri().path();
 
-    // Route to appropriate handler based on path
-    let result = match request_path {
+    // Detect /nocache/ prefix to bypass cache entirely (no read, no write)
+    let (bypass_cache, effective_path) =
+        if let Some(stripped) = request_path.strip_prefix("/nocache") {
+            let real_path = if stripped.is_empty() || stripped == "/" {
+                "/".to_string()
+            } else {
+                stripped.to_string()
+            };
+            (true, real_path)
+        } else {
+            (false, request_path.to_string())
+        };
+
+    // Rewrite the request URI so downstream handlers see the real path
+    let request = if bypass_cache {
+        let (mut parts, body) = request.into_parts();
+        let mut uri_parts = parts.uri.into_parts();
+        let Ok(path_and_query) = effective_path.parse() else {
+            eprintln!("Failed to parse stripped path: {effective_path}");
+            return Ok(Response::builder()
+                .status(500)
+                .body(Full::from("internal error"))
+                .unwrap());
+        };
+        uri_parts.path_and_query = Some(path_and_query);
+        let Ok(uri) = hyper::Uri::from_parts(uri_parts) else {
+            eprintln!("Failed to rebuild URI for path: {effective_path}");
+            return Ok(Response::builder()
+                .status(500)
+                .body(Full::from("internal error"))
+                .unwrap());
+        };
+        parts.uri = uri;
+        Request::from_parts(parts, body)
+    } else {
+        request
+    };
+
+    // Route to appropriate handler based on effective path
+    let result = match effective_path.as_str() {
         "/get_coin_info" => {
             cached_handler(
                 request,
                 db,
-                |_path| true,            // Always cache /get_coin_info requests
+                |_path| !bypass_cache, // Always cache /get_coin_info requests (unless bypass)
                 |_path, _response| true, // Always cache /get_coin_info responses
                 |_path, body_bytes| handle_get_coin_info(body_bytes, proxy_rpc_client.clone()),
             )
@@ -255,7 +293,9 @@ async fn proxy_service(
             cached_handler(
                 request,
                 db,
-                |path| !cache_allowlist.is_empty() && cache_allowlist.contains(path),
+                |path| {
+                    !bypass_cache && !cache_allowlist.is_empty() && cache_allowlist.contains(path)
+                },
                 should_cache_response,
                 |path, body_bytes| {
                     proxy_handler(path.to_string(), body_bytes, backend_client.clone())
